@@ -312,7 +312,7 @@ void detect_phy(XEmacPs *xemacpsp)
 			if ((phy_reg != PHY_MARVELL_IDENTIFIER) &&
 				(phy_reg != PHY_TI_IDENTIFIER) &&
 				(phy_reg != PHY_REALTEK_IDENTIFIER) &&
-				(phy_reg != MICREL_PHY_IDENTIFIER)) {
+				(phy_reg != PHY_MICREL_IDENTIFIER)) {
 				xil_printf("WARNING: Not a Marvell or TI or Realtek or Micrel Ethernet PHY. Please verify the initialization sequence\r\n");
 			}
 		}
