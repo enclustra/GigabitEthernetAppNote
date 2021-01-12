@@ -12,7 +12,7 @@ The [Xilinx LWIP library](https://xilinx-wiki.atlassian.net/wiki/spaces/A/pages/
 
 The **KSZ9031RNX** is not natively supported by the Xilinx LWIP and therefore handling this device needs to be added manually. A custom function is responsible for setting the RGMII delays of the PHY. The write procedure is described in detail in the [data sheet of the KSZ9031RNX](http://ww1.microchip.com/downloads/en/DeviceDoc/00002117F.pdf). 
 
-A modified version of the standard LWIP files is included in the material accompanying this Application Note where the necessary changes are included already for **Zynq SoC**, **Zynq MPSoC** ([xaxiemacif_physpeed.c](./code/RGMII/LWIPModifications/xaxiemacif_physpeed.c)) and **Microblaze** ([xemacpsif_physpeed.c](./code/RGMII/LWIPModifications/xemacpsif_physpeed.c)) designs.
+A modified version of the standard LWIP files is included in the material accompanying this Application Note where the necessary changes are included already for **Zynq SoC**, **Zynq MPSoC** ([xemacpsif_physpeed.c](./code/RGMII/LWIPModifications/xemacpsif_physpeed.c)) and **Microblaze** ([xaxiemacif_physpeed.c](./code/RGMII/LWIPModifications/xaxiemacif_physpeed.c)) designs.
 
 For **Zynq SoC** and **Zynq MPSoC** another possible way to setup the RGMII delays is in the First Stage Boot Loader (FSBL). The following code excerpt from the [fsbl_hooks.c](./code/RGMII/FSBLModifications/fsbl_hooks.c) file shows how this can be done:
 
