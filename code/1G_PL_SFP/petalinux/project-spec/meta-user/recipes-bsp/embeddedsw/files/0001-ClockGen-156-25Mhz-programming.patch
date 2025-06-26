@@ -1,0 +1,2649 @@
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/ClockGenerator.c b/lib/sw_apps/zynqmp_fsbl/src/ClockGenerator.c
+new file mode 100755
+index 0000000000..6d2ace4786
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/ClockGenerator.c
+@@ -0,0 +1,257 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "ClockGenerator.h"
++#include "Si5338_register_map.h"
++//-------------------------------------------------------------------------------------------------
++// Directives, typedefs and constants
++//-------------------------------------------------------------------------------------------------
++
++// Si5338 I2C default device address
++#define CLOCK_GENERATOR_DEVICE_ADDRESS 0x70
++
++// Masks for clock generator configuration
++#define LOS_MASK 0x04
++#define LOCK_MASK 0x15
++
++//-------------------------------------------------------------------------------------------------
++
++//-------------------------------------------------------------------------------------------------
++// Function definitions
++//-------------------------------------------------------------------------------------------------
++
++// Try to read from register at address 0 to see if the device is present on the specified device address
++EN_RESULT ClkGen_Initialise(bool* pDeviceIsPresent) {
++	if (pDeviceIsPresent == NULL)
++	    {
++	        return EN_ERROR_NULL_POINTER;
++	    }
++
++	uint8_t readBuffer;
++    if (EN_FAILED(
++            I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 0, EI2cSubAddressMode_OneByte, sizeof(readBuffer), (uint8_t*)&readBuffer)))
++    {
++        *pDeviceIsPresent = false;
++        EN_PRINTF("Device not present at address: 0x%x \n\r", CLOCK_GENERATOR_DEVICE_ADDRESS);
++    }
++    else
++    {
++    	*pDeviceIsPresent = true;
++#ifdef _DEBUG_CLKGEN
++        EN_PRINTF("Device present at address: 0x%x \n\r", CLOCK_GENERATOR_DEVICE_ADDRESS);
++#endif
++    }
++
++	return EN_SUCCESS;
++}
++
++EN_RESULT ClkGen_ReadAllData() {
++	uint8_t readBuffer [511];
++	uint8_t readBuffer1 [255];
++	uint8_t readBuffer2 [255];
++	uint8_t writeBuffer;
++
++	// There are 352 registers to access in the Si5338
++	int NumberOfBytes = 352;
++
++	// Read first page from 0 to end
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 0x00, EI2cSubAddressMode_OneByte, 256, (uint8_t*)&readBuffer1));
++
++	// Set PAGE_SEL to second page
++	SleepMilliseconds(200);
++	writeBuffer = 0x01;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 0xFF, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++	SleepMilliseconds(200);
++
++	// Read second page from 0 to end
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 0x00, EI2cSubAddressMode_OneByte, 256, (uint8_t*)&readBuffer2));
++
++	// Set to first stage
++	writeBuffer = 0x00;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 0xFF, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++
++	// Concatenate the two read pages and print the data
++	memcpy(readBuffer, readBuffer1, sizeof(uint8_t)*256);
++	memcpy(readBuffer + 256, readBuffer2, sizeof(uint8_t)*256);
++
++	for(int i=0; i<=NumberOfBytes; i++) {
++		EN_PRINTF("Address: %d; Content: %x \n\r", i, readBuffer[i]);
++	}
++
++	return EN_SUCCESS;
++}
++
++EN_RESULT ClkGen_WriteData() {
++	uint8_t writeBuffer;
++	uint8_t readBuffer;
++
++	uint8_t currentValue;
++	uint8_t clearCurrentValue;
++	uint8_t clearNewValue;
++	uint8_t newValue;
++
++	uint8_t temp;
++
++	uint8_t fcal1;
++	uint8_t fcal2;
++
++	Reg_Data currentEntry;
++
++	/** Start at the top of the I2C programming procedure figure of the Si5338 data sheet */
++
++	// Disable outputs: OEB_ALL=1; reg230[4]
++	writeBuffer = 0x10;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 230, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++
++	// Pause LOL: DIS_LOL=1; reg241[7]
++	writeBuffer = 0xE5;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 241, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++
++	/** Write all register values from the generated register map file to the Si5338 */
++#ifdef _DEBUG_CLKGEN
++	EN_PRINTF("Get each value and mask and apply it to the Si5338 \n\r");
++#endif
++	// Get each value and mask and apply it to the Si5338
++	for(int counter = 0; counter < NUM_REGS_MAX; counter++) {
++		currentEntry = Reg_Store[counter];
++
++		// If a mask is 0x00 all the bits in the register are reserved and can not be changed
++
++		if(currentEntry.Reg_Mask != 0x00) {
++			if(currentEntry.Reg_Mask == 0xFF) {
++				// do a regular I2C write to the register at the specified address with the value from the generated register map file
++				writeBuffer = currentEntry.Reg_Val;
++				EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, currentEntry.Reg_Addr, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++#ifdef _DEBUG_CLKGEN
++				EN_PRINTF("Address: %d; Value: %x \n\r", currentEntry.Reg_Addr, currentEntry.Reg_Val);
++#endif
++			}
++			else {
++				// do a read-modify-write using I2C and bit-wise operations
++
++				// get the current value from the device at thh register located at the specified address
++				EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, currentEntry.Reg_Addr, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++				currentValue = readBuffer;
++
++				// clear the bits that are allowed to be accessed in the current value of the register
++				clearCurrentValue = currentValue & ~currentEntry.Reg_Mask;
++
++				// clear the bits in the desired data that are not allowed to be accessed
++				clearNewValue = currentEntry.Reg_Val & currentEntry.Reg_Mask;
++
++				// combine the cleared values to get the new value to write to the desired register
++				newValue = clearNewValue | clearCurrentValue;
++				writeBuffer = newValue;
++#ifdef _DEBUG_CLKGEN
++				EN_PRINTF("Address: %d; Value: %x \n\r", currentEntry.Reg_Addr, newValue);
++#endif
++				EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, currentEntry.Reg_Addr, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++			}
++			SleepMilliseconds(200);
++		}
++	}
++
++	/** Validate input clock status: input clock are validated with the LOS alarms.
++	 * See register 218 to determine which LOS should be monitored.
++	 * In the example configuration here the xtal input in IN1 and IN2 are checked.
++	 * Change the LOS_MASK if using other inputs.
++	 */
++
++	// Check register 218 responsible for tracking LOL until input clock is valid
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 218, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++	temp = readBuffer & LOS_MASK;
++	while(temp != 0) {
++		EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 218, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++		temp = readBuffer & LOS_MASK;
++	}
++#ifdef _DEBUG_CLKGEN
++	EN_PRINTF("Input clock is valid \n\r");
++#endif
++	// Configure PLL for locking: FCAL_OVRD_EN=0; reg49[7]
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 49, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++	writeBuffer = readBuffer & 0x7F;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 49, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++
++	// Initiate locking of PLL: SOFT_RESET = 1; reg246[1]
++	writeBuffer = 0x02;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 246, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++#ifdef _DEBUG_CLKGEN
++	EN_PRINTF("PLL locking initiated \n\r");
++#endif
++	// Wait at least 25 ms
++	SleepMilliseconds(50);
++
++	// Restart LOL: DIS_LOL = 0; reg241[7]; set reg241 = 0x65
++	writeBuffer = 0x65;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 241, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++
++	// Check if PLL is locked: PLL is locked when PLL_LOL, SYS_CAL and all other alarms are cleared
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 218, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++	temp = readBuffer & LOCK_MASK;
++	while(temp != 0) {
++		EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 218, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++		temp = readBuffer & LOCK_MASK;
++	}
++#ifdef _DEBUG_CLKGEN
++	EN_PRINTF("PLL is locked \n\r");
++#endif
++	/** Copy FCAL values to active registers as follows:
++	 * 237[1:0] to 47[1:0]
++	 * 236[7:0] to 46[7:0]
++	 * 235[7:0] to 45[7:0]
++	 * Set 47[7:2] = 000101b
++	 */
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 235, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 45, EI2cSubAddressMode_OneByte, (uint8_t*)&readBuffer, 1));
++
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 236, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 46, EI2cSubAddressMode_OneByte, (uint8_t*)&readBuffer, 1));
++
++	// clear bits 0 and 1 from 47 and combine with bit 0 and 1 from 237
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 47, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++	fcal1 = readBuffer;
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 237, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++	fcal2 = readBuffer;
++	writeBuffer = (fcal1 & 0xFC) | (fcal2 & 0x03);
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 47, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++
++	// Set PLL to use FCAL values: FCAL_OVRD_EN = 1; reg49[7]
++	EN_RETURN_IF_FAILED(I2cRead(CLOCK_GENERATOR_DEVICE_ADDRESS, 49, EI2cSubAddressMode_OneByte, 1, (uint8_t*)&readBuffer));
++	writeBuffer = readBuffer | 0x80;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 49, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++
++	// If using down spread check the I2C programming procedure in the I2C application note or the Si5338 data sheet at this stage to make the necessary adjustment
++
++	// Enable outputs: OEB_ALL = 0; reg230[4]
++	writeBuffer = 0x00;
++	EN_RETURN_IF_FAILED(I2cWrite(CLOCK_GENERATOR_DEVICE_ADDRESS, 230, EI2cSubAddressMode_OneByte, (uint8_t*)&writeBuffer, 1));
++#ifdef _DEBUG_CLKGEN
++	EN_PRINTF("Outputs are enabled \n\r");
++#endif
++
++	return EN_SUCCESS;
++}
++
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/ClockGenerator.h b/lib/sw_apps/zynqmp_fsbl/src/ClockGenerator.h
+new file mode 100755
+index 0000000000..0efdf54a34
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/ClockGenerator.h
+@@ -0,0 +1,58 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "StandardIncludes.h"
++#include "I2cInterface.h"
++#include "UtilityFunctions.h"
++
++// Function declarations
++//-------------------------------------------------------------------------------------------------
++
++/**
++ * \brief Initialize the clock generator.
++ * @param	pDeviceIsPresent	check if device is present at the device address
++ * @return	Result  code
++ */
++EN_RESULT ClkGen_Initialise(bool* pDeviceIsPresent);
++
++/**
++ * \brief Configure the clock generator
++ *
++ * Configures all registers of the clock generator with the data out of a header file.
++ * This header file can be generated using the ClockBuilder Pro software available by SI
++ *
++ * @return					Result code
++ */
++EN_RESULT ClkGen_WriteData();
++
++/**
++ * \brief Read all data from the clock generator
++ *
++ * @return					Result code
++ */
++EN_RESULT ClkGen_ReadAllData();
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/ErrorCodes.h b/lib/sw_apps/zynqmp_fsbl/src/ErrorCodes.h
+new file mode 100755
+index 0000000000..e046c36e10
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/ErrorCodes.h
+@@ -0,0 +1,174 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "SystemDefinitions.h"
++
++
++//-------------------------------------------------------------------------------------------------
++// Error code definitions
++//-------------------------------------------------------------------------------------------------
++
++/** \cond */
++
++typedef enum EN_RESULT
++{
++    EN_SUCCESS = 0x00000000,
++
++    EN_ERROR_NULL_POINTER = 0x80000000,
++    EN_ERROR_INVALID_ARGUMENT,
++    EN_ERROR_FAILED_TO_SET_I2C_DEVICE_ADDRESS,
++    EN_ERROR_FAILED_TO_INITIALISE_I2C_CONTROLLER,
++    EN_ERROR_FAILED_TO_START_XIIC_DEVICE,
++    EN_ERROR_FAILED_TO_STOP_XIIC_DEVICE,
++    EN_ERROR_FAILED_TO_INITIALISE_INTERRUPT_CONTROLLER,
++    EN_ERROR_FAILED_TO_START_INTERRUPT_CONTROLLER,
++    EN_ERROR_XIIC_SEND_FAILED,
++    EN_ERROR_XIIC_RECEIVE_FAILED,
++    EN_ERROR_I2C_READ_FAILED,
++    EN_ERROR_I2C_WRITE_FAILED,
++    EN_ERROR_I2C_READ_TIMEOUT,
++    EN_ERROR_I2C_WRITE_TIMEOUT,
++    EN_ERROR_I2C_SLAVE_NACK,
++    EN_ERROR_TIMER_INITIALISATION_FAILED,
++    EN_ERROR_TIMER_SELF_TEST_FAILED,
++    EN_ERROR_INVALID_MODULE_CONFIG_PROPERTY_INDEX,
++    EN_ERROR_MODULE_CONFIG_PROPERTY_VALUE_OUT_OF_RANGE,
++    EN_ERROR_MODULE_CONFIG_PROPERTIES_NOT_YET_READ,
++    EN_ERROR_MODULE_CONFIG_PROPERTY_DOES_NOT_HAVE_VALUE_KEY,
++    EN_ERROR_FAILED_TO_INITIALISE_EEPROM,
++    EN_ERROR_FAILED_TO_WAKE_ATMEL_ATSHA204A,
++    EN_ERROR_ATSHA204A_INVALID_ADDRESS_PARAMETER,
++    EN_ERROR_ATSHA204A_INVALID_RESPONSE_CRC,
++    EN_ERROR_ATSHA204A_INVALID_RESPONSE_SIZE,
++    EN_ERROR_ATSHA204A_EXECUTION_ERROR,
++    EN_ERROR_ATSHA204A_FIRST_COMMAND_AFTER_WAKE,
++    EN_ERROR_ATSHA204A_INVALID_MAC,
++    EN_ERROR_ATSHA204A_IO_ERROR,
++    EN_ERROR_ATSHA204A_PARSE_ERROR,
++    EN_ERROR_ATSHA204A_UNKNOWN_ERROR,
++    EN_ERROR_ATSHA204A_FUNCTIONALITY_NOT_YET_IMPLEMENTED,
++    EN_ERROR_ATSHA204A_WRITE_VERIFICATION_ERROR,
++    EN_ERROR_ATSHA204A_INVALID_DATA_SLOT_INDEX,
++    EN_ERROR_RTC_DEVICE_NOT_DETECTED,
++    EN_ERROR_RTC_FEATURE_NOT_SUPPORTED,
++    EN_ERROR_RTC_NOT_WORKING,
++    EN_ERROR_IOTEST_FAILED,
++    EN_ERROR_SUPPLY_OUT_OF_RANGE
++
++} EN_RESULT;
++
++/** \endcond */
++
++
++//-------------------------------------------------------------------------------------------------
++// Macros
++//-------------------------------------------------------------------------------------------------
++
++
++/**
++ * \brief Returns a boolean true if the argument status code \a status represents an error.
++ */
++#define EN_FAILED(status) (((EN_RESULT)(status)) != EN_SUCCESS)
++
++/**
++ * \brief Returns a boolean true if the argument status code \a status represents a success.
++ */
++#define EN_SUCCEEDED(status) (((EN_RESULT)(status)) == EN_SUCCESS)
++
++
++#define EN_PRINT_ERROR(status, message)																					\
++	    do                                                                                                              \
++	    {                                                                                                               \
++	        EN_PRINTF("Error, status code 0x%x: %s\r\n", status, message);                                              \                                                                                                             \
++	    } while (0)
++
++
++/**
++ * \brief Tests the status code \a status and returns if it's a failure code.
++ *
++ * Used to neaten code and avoid large if-else trees.
++ */
++#define EN_RETURN_IF_FAILED(status)                                                                                    \
++    do                                                                                                                 \
++    {                                                                                                                  \
++        EN_RESULT _status = status;                                                                                    \
++        if (EN_FAILED(_status))                                                                                        \
++        {                                                                                                              \
++            return _status;                                                                                            \
++        }                                                                                                              \
++    } while (0)
++
++
++/**
++ * \brief Tests the status code \a status and returns if it's a failure code.
++ *
++ * Used to neaten code and avoid large if-else trees.
++ */
++#define EN_RETURN_IF_FAILED_PRINT(status, message)                                                                     \
++    do                                                                                                                 \
++                                                                                                                       \
++    {                                                                                                                  \
++        EN_RESULT _status = status;                                                                                    \
++        if (EN_FAILED(_status))                                                                                        \
++        {    																										   \
++        	EN_PRINTF("Error: %s (status code = 0x%x)\r\n", message, status);  										   \
++            return _status;                                                                                            \
++        }                                                                                                              \
++    } while (0)
++
++
++#if SYSTEM == XILINX_MICROBLAZE
++/**
++ * This macro is used to handle errors in calls to the Xilinx Microblaze driver functions.
++ */
++#define RETURN_IF_XILINX_CALL_FAILED(x, returnCode)                                                                    \
++    do                                                                                                                 \
++    {                                                                                                                  \
++        int _status = x;                                                                                               \
++        if (_status != XST_SUCCESS)                                                                                    \
++        {                                                                                                              \
++            return returnCode;                                                                                         \
++        }                                                                                                              \
++    } while (0)
++#endif
++
++#if SYSTEM == XILINX_ARM_SOC
++/**
++ * This macro is used to handle errors in calls to the Xilinx Microblaze driver functions.
++ */
++#define RETURN_IF_XILINX_CALL_FAILED(x, returnCode)                                                                    \
++    do                                                                                                                 \
++    {                                                                                                                  \
++        int _status = x;                                                                                               \
++        if (_status != XST_SUCCESS)                                                                                    \
++        {                                                                                                              \
++            return returnCode;                                                                                         \
++        }                                                                                                              \
++    } while (0)
++#endif
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/GlobalTypes.h b/lib/sw_apps/zynqmp_fsbl/src/GlobalTypes.h
+new file mode 100755
+index 0000000000..2a1e393d44
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/GlobalTypes.h
+@@ -0,0 +1,77 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++#include "SystemDefinitions.h"
++
++//-------------------------------------------------------------------------------------------------
++// Use correct header for types
++// This is different for the target platform because uboot implements types in lib/linux/types.h
++//-------------------------------------------------------------------------------------------------
++#if SYSTEM == XILINX_MICROBLAZE
++#include <stdint.h>
++#elif SYSTEM == XILINX_ARM_SOC
++#include <stdint.h>
++#elif SYSTEM == ALTERA_NIOS
++#include <stdint.h>
++
++
++#ifndef FALSE
++#define FALSE 0
++#endif
++
++#ifndef TRUE
++#define TRUE 1
++#endif
++
++
++#elif SYSTEM == ALTERA_ARM_SOC
++#include <stdint.h>
++#elif SYSTEM == UBOOT
++#include <asm/types.h>
++
++typedef s8 int8_t;
++typedef u8 uint8_t;
++
++typedef s16 int16_t;
++typedef u16 uint16_t;
++
++typedef s32 int32_t;
++typedef u32 uint32_t;
++
++typedef s64 int64_t;
++typedef u64 uint64_t;
++
++#define true 1
++#define false 0
++#endif
++
++#ifndef __cplusplus
++#define bool char
++#define true 1
++#define false 0
++#endif
++
++#ifndef NULL
++#define NULL ((void *)0)
++#endif
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/I2cInterface.c b/lib/sw_apps/zynqmp_fsbl/src/I2cInterface.c
+new file mode 100755
+index 0000000000..bae9c2f120
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/I2cInterface.c
+@@ -0,0 +1,436 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "I2cInterface.h"
++#include "I2cInterfaceVariables.h"
++#include "SystemDefinitions.h"
++#include "UtilityFunctions.h"
++#include "TimerInterface.h"
++#include "InterruptController.h"
++#include "ErrorCodes.h"
++
++//-------------------------------------------------------------------------------------------------
++// Constants
++//-------------------------------------------------------------------------------------------------
++
++const unsigned int I2C_CLOCK_SPEED_HZ = 100000;
++
++
++//-------------------------------------------------------------------------------------------------
++// Global variable definitions
++//-------------------------------------------------------------------------------------------------
++
++XIicPs g_XIicPsInstance;
++XIicPs_Config* g_pXIicPsConfig;
++
++volatile bool g_i2cTransmissionInProgress;
++volatile bool g_i2cReceiveInProgress;
++volatile bool g_i2cSlaveNack;
++
++volatile uint32_t g_transmissionErrorCount;
++
++//-------------------------------------------------------------------------------------------------
++// Function definitions
++//-------------------------------------------------------------------------------------------------
++
++
++/**
++ * This Status handler is called asynchronously from an interrupt
++ * context and indicates the events that have occurred.
++ *
++ * @param	InstancePtr is a pointer to the IIC driver instance for which
++ *		the handler is being called for.
++ * @param	Event indicates the condition that has occurred.
++ *
++ * @return	None.
++ *
++ * @note		None.
++ *
++ */
++void StatusHandler(void* InstancePtr, int event)
++{
++    if (event & XIICPS_EVENT_COMPLETE_RECV)
++    {
++        g_i2cReceiveInProgress = false;
++
++#ifdef _DEBUG
++        EN_PRINTF("Event = receive complete\n\r");
++#endif
++    }
++
++    if (event & XIICPS_EVENT_COMPLETE_SEND)
++    {
++        g_i2cTransmissionInProgress = false;
++
++#ifdef _DEBUG
++        EN_PRINTF("Event = send complete\n\r");
++#endif
++    }
++
++
++    if ((event & XIICPS_EVENT_SLAVE_RDY) == 0)
++    {
++
++        g_transmissionErrorCount++;
++
++#ifdef _DEBUG
++        EN_PRINTF("Data received with error\n\r");
++#endif
++    }
++
++    if (event & XIICPS_EVENT_NACK)
++    {
++        g_i2cSlaveNack = true;
++
++#ifdef _DEBUG
++        EN_PRINTF("Event = NACK received\n\r");
++#endif
++    }
++
++#ifdef _DEBUG
++    if (event & XIICPS_EVENT_TIME_OUT)
++    {
++        EN_PRINTF("Event = timeout\n\r");
++    }
++
++    if (event & XIICPS_EVENT_ERROR)
++    {
++        EN_PRINTF("Event = error\n\r");
++    }
++
++    if (event & XIICPS_EVENT_ARB_LOST)
++    {
++        EN_PRINTF("Event = arbitration lost\n\r");
++    }
++
++    if (event & XIICPS_EVENT_SLAVE_RDY)
++    {
++        EN_PRINTF("Event = slave ready\n\r");
++    }
++
++    if (event & XIICPS_EVENT_RX_OVR)
++    {
++        EN_PRINTF("Event = receive overflow\n\r");
++    }
++
++    if (event & XIICPS_EVENT_TX_OVR)
++    {
++        EN_PRINTF("Event = transmit overflow\n\r");
++    }
++
++    if (event & XIICPS_EVENT_RX_UNF)
++    {
++        EN_PRINTF("Event = receive underflow\n\r");
++    }
++
++#endif
++}
++
++EN_RESULT InitialiseI2cInterface()
++{
++
++    g_pXIicPsConfig = XIicPs_LookupConfig(IIC_DEVICE_ID);
++    if (g_pXIicPsConfig == NULL)
++    {
++        return EN_ERROR_FAILED_TO_INITIALISE_I2C_CONTROLLER;
++    }
++
++    RETURN_IF_XILINX_CALL_FAILED(XIicPs_CfgInitialize(&g_XIicPsInstance, g_pXIicPsConfig, g_pXIicPsConfig->BaseAddress),
++                                 EN_ERROR_FAILED_TO_INITIALISE_I2C_CONTROLLER);
++
++
++    RETURN_IF_XILINX_CALL_FAILED(XIicPs_SelfTest(&g_XIicPsInstance), EN_ERROR_FAILED_TO_INITIALISE_I2C_CONTROLLER);
++
++    EN_RETURN_IF_FAILED(SetupInterruptSystem());
++
++    // Set the status handler.
++    XIicPs_SetStatusHandler(&g_XIicPsInstance, (void*)&g_XIicPsInstance, (XIicPs_IntrHandler)StatusHandler);
++
++    // Set I2C clock to 100kHz
++    XIicPs_SetSClk(&g_XIicPsInstance, I2C_CLOCK_SPEED_HZ);
++
++    return EN_SUCCESS;
++}
++
++
++EN_RESULT I2cAbort()
++{
++    XIicPs_Abort(&g_XIicPsInstance);
++    return EN_SUCCESS;
++}
++
++EN_RESULT I2cWrite_NoSubAddress(uint8_t deviceAddress, const uint8_t* pWriteBuffer, uint32_t numberOfBytesToWrite)
++{
++    if (pWriteBuffer == NULL)
++    {
++        return EN_ERROR_NULL_POINTER;
++    }
++
++    if (numberOfBytesToWrite == 0)
++    {
++        return EN_ERROR_INVALID_ARGUMENT;
++    }
++
++#ifdef _DEBUG
++    xil_printf("I2C: Writing %d bytes to device address 0x%x\n\r", numberOfBytesToWrite, deviceAddress);
++#endif
++
++    // Wait for bus to become idle
++    while (XIicPs_BusIsBusy(&g_XIicPsInstance))
++    {
++        /* NOP */
++    }
++
++    // Set the transmission flags.
++    g_transmissionErrorCount = 0;
++    g_i2cTransmissionInProgress = true;
++    g_i2cSlaveNack = false;
++
++    XIicPs_MasterSend(&g_XIicPsInstance, (uint8_t*)pWriteBuffer, numberOfBytesToWrite, deviceAddress);
++
++    // Wait till data is transmitted.
++    unsigned int timeout = 0;
++    while ((g_i2cTransmissionInProgress && !g_i2cSlaveNack) || (XIicPs_BusIsBusy(&g_XIicPsInstance)))
++
++    {
++        SleepMilliseconds(1);
++        timeout++;
++        if (timeout > 100)
++        {
++#ifdef _DEBUG
++            xil_printf(
++                "Error: I2C timeout when writing %d bytes to device 0x%x\n\r", numberOfBytesToWrite, deviceAddress);
++#endif
++
++            return EN_ERROR_I2C_WRITE_TIMEOUT;
++        }
++    }
++
++    if (g_i2cSlaveNack)
++    {
++#ifdef _DEBUG
++        xil_printf("NACK received from I2C slave at address 0x%x\n\r", deviceAddress);
++#endif
++
++        return EN_ERROR_I2C_SLAVE_NACK;
++    }
++
++    return EN_SUCCESS;
++}
++
++EN_RESULT I2cWrite_ByteSubAddress(uint8_t deviceAddress,
++                                  uint8_t subAddress,
++                                  const uint8_t* pWriteBuffer,
++                                  uint32_t numberOfBytesToWrite)
++{
++    // Create a new array, to contain both the subaddress and the write data.
++    uint8_t transferSizeBytes = numberOfBytesToWrite + 1;
++    uint8_t transferData[transferSizeBytes];
++    transferData[0] = subAddress;
++
++    unsigned int dataByteIndex = 0;
++    for (dataByteIndex = 0; dataByteIndex < numberOfBytesToWrite; dataByteIndex++)
++    {
++        transferData[dataByteIndex + 1] = pWriteBuffer[dataByteIndex];
++    }
++
++    EN_RETURN_IF_FAILED(I2cWrite_NoSubAddress(deviceAddress, (uint8_t*)&transferData, transferSizeBytes));
++
++    return EN_SUCCESS;
++}
++
++EN_RESULT I2cWrite_TwoByteSubAddress(uint8_t deviceAddress,
++                                     uint16_t subAddress,
++                                     const uint8_t* pWriteBuffer,
++                                     uint32_t numberOfBytesToWrite)
++{
++    // Create a new array, to contain both the subaddress and the write data.
++    uint8_t transferSizeBytes = numberOfBytesToWrite + 2;
++    uint8_t transferData[transferSizeBytes];
++    transferData[0] = GetUpperByte(subAddress);
++    transferData[1] = GetLowerByte(subAddress);
++
++    unsigned int dataByteIndex = 0;
++    for (dataByteIndex = 0; dataByteIndex < numberOfBytesToWrite; dataByteIndex++)
++    {
++        transferData[dataByteIndex + 2] = pWriteBuffer[dataByteIndex];
++    }
++
++    EN_RETURN_IF_FAILED(I2cWrite_NoSubAddress(deviceAddress, (uint8_t*)&transferData, transferSizeBytes));
++
++    return EN_SUCCESS;
++}
++
++EN_RESULT I2cRead_NoSubAddress(uint8_t deviceAddress, uint8_t* pReadBuffer, uint32_t numberOfBytesToRead)
++{
++
++    if (pReadBuffer == NULL)
++    {
++        return EN_ERROR_NULL_POINTER;
++    }
++
++    if (numberOfBytesToRead == 0)
++    {
++        return EN_ERROR_INVALID_ARGUMENT;
++    }
++
++#ifdef _DEBUG
++    xil_printf("I2C: Reading %d bytes from device address 0x%x\n\r", numberOfBytesToRead, deviceAddress);
++#endif
++
++    // Wait for bus to become idle
++    while (XIicPs_BusIsBusy(&g_XIicPsInstance))
++    {
++        /* NOP */
++    }
++
++    // Set the transmission flags.
++    g_transmissionErrorCount = 0;
++    g_i2cReceiveInProgress = true;
++    g_i2cSlaveNack = false;
++
++    // Receive the data.
++    XIicPs_MasterRecv(&g_XIicPsInstance, pReadBuffer, numberOfBytesToRead, deviceAddress);
++
++    // Wait till all the data is received.
++    unsigned int timeout = 0;
++    while (g_i2cReceiveInProgress && !g_i2cSlaveNack)
++    {
++        SleepMilliseconds(1);
++        timeout++;
++        if (timeout > 1000)
++        {
++#ifdef _DEBUG
++            xil_printf(
++                "Error: I2C timeout when receiving %d bytes from device 0x%x\n\r", numberOfBytesToRead, deviceAddress);
++#endif
++            return EN_ERROR_I2C_READ_TIMEOUT;
++        }
++    }
++
++    if (g_i2cSlaveNack)
++    {
++#ifdef _DEBUG
++        xil_printf("NACK received from I2C slave at address 0x%x\n\r", deviceAddress);
++#endif
++
++        return EN_ERROR_I2C_SLAVE_NACK;
++    }
++
++    return EN_SUCCESS;
++}
++
++EN_RESULT I2cRead_ByteSubAddress(uint8_t deviceAddress,
++                                 uint8_t subAddress,
++                                 uint8_t* pReadBuffer,
++                                 uint32_t numberOfBytesToRead)
++{
++    // Write the subaddress, with start condition asserted but stop condition not.
++    EN_RETURN_IF_FAILED(I2cWrite_NoSubAddress(deviceAddress, (uint8_t*)&subAddress, 1));
++
++    // Perform the read.
++    EN_RETURN_IF_FAILED(I2cRead_NoSubAddress(deviceAddress, pReadBuffer, numberOfBytesToRead));
++
++    return EN_SUCCESS;
++}
++
++EN_RESULT I2cRead_WordSubAddress(uint8_t deviceAddress,
++                                 uint16_t subAddress,
++                                 uint8_t* pReadBuffer,
++                                 uint32_t numberOfBytesToRead)
++{
++    // Write the subaddress, with start condition asserted but stop condition not.
++    EN_RETURN_IF_FAILED(I2cWrite_NoSubAddress(deviceAddress, (uint8_t*)&subAddress, 2));
++
++    // Perform the read.
++    EN_RETURN_IF_FAILED(I2cRead_NoSubAddress(deviceAddress, pReadBuffer, numberOfBytesToRead));
++
++    return EN_SUCCESS;
++}
++
++EN_RESULT I2cRead(uint8_t deviceAddress,
++                  uint16_t subAddress,
++                  EI2cSubAddressMode_t subAddressMode,
++                  uint32_t numberOfBytesToRead,
++                  uint8_t* pReadBuffer)
++{
++
++    switch (subAddressMode)
++    {
++    case EI2cSubAddressMode_None:
++    {
++        EN_RETURN_IF_FAILED(I2cRead_NoSubAddress(deviceAddress, pReadBuffer, numberOfBytesToRead));
++        break;
++    }
++    case EI2cSubAddressMode_OneByte:
++    {
++        EN_RETURN_IF_FAILED(
++            I2cRead_ByteSubAddress(deviceAddress, (uint8_t)subAddress, pReadBuffer, numberOfBytesToRead));
++        break;
++    }
++    case EI2cSubAddressMode_TwoBytes:
++    {
++        EN_RETURN_IF_FAILED(
++            I2cRead_WordSubAddress(deviceAddress, (uint16_t)subAddress, pReadBuffer, numberOfBytesToRead));
++    }
++    default:
++        break;
++    }
++
++    return EN_SUCCESS;
++}
++
++EN_RESULT I2cWrite(uint8_t deviceAddress,
++                   uint16_t subAddress,
++                   EI2cSubAddressMode_t subAddressMode,
++                   const uint8_t* pWriteBuffer,
++                   uint32_t numberOfBytesToWrite)
++{
++
++    switch (subAddressMode)
++    {
++    case EI2cSubAddressMode_None:
++    {
++        EN_RETURN_IF_FAILED(I2cWrite_NoSubAddress(deviceAddress, pWriteBuffer, numberOfBytesToWrite));
++        break;
++    }
++    case EI2cSubAddressMode_OneByte:
++    {
++        EN_RETURN_IF_FAILED(
++            I2cWrite_ByteSubAddress(deviceAddress, (uint8_t)subAddress, pWriteBuffer, numberOfBytesToWrite));
++        break;
++    }
++    case EI2cSubAddressMode_TwoBytes:
++    {
++        EN_RETURN_IF_FAILED(I2cWrite_TwoByteSubAddress(deviceAddress, subAddress, pWriteBuffer, numberOfBytesToWrite));
++        break;
++    }
++    default:
++        break;
++    }
++
++    return EN_SUCCESS;
++}
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/I2cInterface.h b/lib/sw_apps/zynqmp_fsbl/src/I2cInterface.h
+new file mode 100755
+index 0000000000..8aac0dcd65
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/I2cInterface.h
+@@ -0,0 +1,91 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "StandardIncludes.h"
++
++
++//-------------------------------------------------------------------------------------------------
++// Types, definitions and constants
++//-------------------------------------------------------------------------------------------------
++
++/**
++* \brief I2C subaddress modes.
++*/
++typedef enum
++{
++    EI2cSubAddressMode_None,    ///< No subaddress
++    EI2cSubAddressMode_OneByte, ///< One-byte subaddress
++    EI2cSubAddressMode_TwoBytes ///< Two-byte subaddress
++} EI2cSubAddressMode_t;
++
++
++
++
++//-------------------------------------------------------------------------------------------------
++// Function definitions
++//-------------------------------------------------------------------------------------------------
++
++/**
++ * \brief Perform any required initialisation for I2C operations.
++ *
++ * @return		Result code
++ */
++EN_RESULT InitialiseI2cInterface();
++
++
++/**
++ * \brief Perform a read from the I2C bus.
++ *
++ * \param[in]	deviceAddress			The device address
++ * \param[in]	subAddress				Register subaddress
++ * \param[in]	subAddressMode			Subaddress mode
++ * \param[in]	numberOfBytesToRead		The number of bytes to read
++ * \param[out]	pReadBuffer				Buffer to receive read data
++ * \returns								Result code
++ */
++EN_RESULT I2cRead(uint8_t deviceAddress,
++                  uint16_t subAddress,
++                  EI2cSubAddressMode_t subAddressMode,
++                  uint32_t numberOfBytesToRead,
++                  uint8_t* pReadBuffer);
++
++/**
++ * \brief Perform a write to the I2C bus.
++ *
++ * \param	deviceAddress			Device address
++ * \param	subAddress				Register subaddress
++ * \param	subAddressMode			Subaddress mode
++ * \param	writeBuffer				Buffer containing write data
++ * \param	numberOfBytesToWrite	The number of bytes to write
++ * \returns							Result code
++ */
++EN_RESULT I2cWrite(uint8_t deviceAddress,
++                   uint16_t subAddress,
++                   EI2cSubAddressMode_t subAddressMode,
++                   const uint8_t* pWriteBuffer,
++                   uint32_t numberOfBytesToWrite);
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/I2cInterfaceVariables.h b/lib/sw_apps/zynqmp_fsbl/src/I2cInterfaceVariables.h
+new file mode 100755
+index 0000000000..2eefe1411e
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/I2cInterfaceVariables.h
+@@ -0,0 +1,47 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include <xiicps.h>
++#include <xparameters.h>
++#include <xparameters_ps.h>
++
++//-------------------------------------------------------------------------------------------------
++// Definitions and constants
++//-------------------------------------------------------------------------------------------------
++
++/// Device ID
++#define IIC_DEVICE_ID XPAR_XIICPS_0_DEVICE_ID
++
++/// Interrupt ID
++#define IIC_INTR_ID XPAR_XIICPS_0_INTR
++
++//-------------------------------------------------------------------------------------------------
++// Global variable declarations
++//-------------------------------------------------------------------------------------------------
++
++extern XIicPs g_XIicPsInstance;
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/InterruptController.c b/lib/sw_apps/zynqmp_fsbl/src/InterruptController.c
+new file mode 100755
+index 0000000000..32893ad5c8
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/InterruptController.c
+@@ -0,0 +1,94 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "InterruptController.h"
++#include "I2cInterfaceVariables.h"
++#include "TimerInterfaceVariables.h"
++
++#include <xil_exception.h>
++#include <xscugic.h>
++#include <xparameters.h>
++
++//-------------------------------------------------------------------------------------------------
++// Definitions and constants
++//-------------------------------------------------------------------------------------------------
++
++#define INTC_DEVICE_ID XPAR_SCUGIC_SINGLE_DEVICE_ID
++
++//-------------------------------------------------------------------------------------------------
++// Global variable definitions
++//-------------------------------------------------------------------------------------------------
++
++/// Interrupt controller, declared in InterruptController.h
++XScuGic g_interruptController;
++
++//-------------------------------------------------------------------------------------------------
++// Function definitions
++//-------------------------------------------------------------------------------------------------
++
++EN_RESULT SetupInterruptSystem()
++{
++
++    XScuGic_Config* pInterruptControllerConfig;
++
++    // Initialize the exception table.
++    Xil_ExceptionInit();
++
++    // Initialize the interrupt controller driver so that it's ready to use.
++    pInterruptControllerConfig = XScuGic_LookupConfig(INTC_DEVICE_ID);
++
++    if (NULL == pInterruptControllerConfig)
++    {
++        return EN_ERROR_NULL_POINTER;
++    }
++
++    RETURN_IF_XILINX_CALL_FAILED(XScuGic_CfgInitialize(&g_interruptController,
++                                                       pInterruptControllerConfig,
++                                                       pInterruptControllerConfig->CpuBaseAddress),
++                                 EN_ERROR_FAILED_TO_INITIALISE_INTERRUPT_CONTROLLER);
++
++    // Register the interrupt controller handler with the exception table.
++    Xil_ExceptionRegisterHandler(
++        XIL_EXCEPTION_ID_IRQ_INT, (Xil_ExceptionHandler)XScuGic_InterruptHandler, &g_interruptController);
++
++    // Connect the device driver handler that will be called when an I2C interrupt
++    // occurs
++    RETURN_IF_XILINX_CALL_FAILED(XScuGic_Connect(&g_interruptController,
++                                                 IIC_INTR_ID,
++                                                 (Xil_InterruptHandler)XIicPs_MasterInterruptHandler,
++                                                 &g_XIicPsInstance),
++                                 EN_ERROR_FAILED_TO_INITIALISE_INTERRUPT_CONTROLLER);
++
++    // Enable the interrupts for the IIC device.
++    XScuGic_Enable(&g_interruptController, IIC_INTR_ID);
++
++    // INSERT ANY FURTHER INTERRUPT ENABLES HERE //
++
++    // Enable non-critical exceptions.
++    Xil_ExceptionEnable();
++
++    return EN_SUCCESS;
++}
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/InterruptController.h b/lib/sw_apps/zynqmp_fsbl/src/InterruptController.h
+new file mode 100755
+index 0000000000..67f9876d39
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/InterruptController.h
+@@ -0,0 +1,56 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "StandardIncludes.h"
++
++#include <xiicps.h>
++#include <xparameters.h>
++#include <xil_types.h>
++
++
++//-------------------------------------------------------------------------------------------------
++// Global variable declarations
++//-------------------------------------------------------------------------------------------------
++
++
++//-------------------------------------------------------------------------------------------------
++// Function declarations
++//-------------------------------------------------------------------------------------------------
++
++/**
++ * \brief Set up the interrupt system.
++ *
++ * As the interrupt controller is used for different functions (I2C, timer), this function is
++ * segregated into its own translation unit. When a block needs to use the interrupt controller,
++ * the appropriate calls should be added to the body of this function. Note that the client blocks
++ * should be initialised before calling this function.
++ *
++ * @return Result code
++ */
++EN_RESULT SetupInterruptSystem();
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/Si5338_register_map.h b/lib/sw_apps/zynqmp_fsbl/src/Si5338_register_map.h
+new file mode 100755
+index 0000000000..4601556abc
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/Si5338_register_map.h
+@@ -0,0 +1,432 @@
++//Register map for use with AN428 (JumpStart)
++//https://www.skyworksinc.com/timing
++//#BEGIN_HEADER
++//Date = Monday, September 30, 2024 3:43 PM
++//File version = 3
++//Software Name = ClockBuilder Pro
++//Software version = 4.13.0.2
++//Software date = 6 10, 2024
++//Chip = Si533x
++//Part Number = Si533x
++//#END_HEADER
++//Input Frequency (MHz) = 100.000000000
++//Input Type = CMOS_SSTL_HSTL
++//P1 = 4
++//Input Mux = DivRefClk
++//FDBK Input Frequency (MHz) = 100.000000000
++//FDBK Input Type = OFF
++//P2 = 1
++//FDBK Mux = NoClk
++//PFD Input Frequency (MHz) = 25.000000000
++//VCO Frequency (GHz) = 2.500000
++//N = 100  (100.0000)
++//Internal feedback enabled
++//Output Clock 0
++// Output is off
++//Output Clock 1
++// Output is off
++//Output Clock 2
++// Output is off
++//Output Clock 3
++// Output Frequency (MHz) = 156.250000000
++// Mux Selection = IDn
++// MultiSynth = 16  (16.0000)
++// R = 1
++//Driver 0
++// Disabled
++// Powered off
++// Output voltage = 3.30
++// Output type = 3.3V LVDS
++// Output state when disabled = StopLow
++//Driver 1
++// Disabled
++// Powered off
++// Output voltage = 3.30
++// Output type = 3.3V LVDS
++// Output state when disabled = StopLow
++//Driver 2
++// Disabled
++// Powered off
++// Output voltage = 3.30
++// Output type = 3.3V LVDS
++// Output state when disabled = StopLow
++//Driver 3
++// Enabled
++// Powered on
++// Output voltage = 3.30
++// Output type = 3.3V LVDS
++// Output state when disabled = StopLow
++//Clock 0 phase inc/dec step size (ns) = 0.000
++//Clock 1 phase inc/dec step size (ns) = 0.000
++//Clock 2 phase inc/dec step size (ns) = 0.000
++//Clock 3 phase inc/dec step size (ns) = 0.000
++//Phase increment and decrement pin control is off
++//Frequency increment and decrement pin control is off
++//Frequency increment and decrement is disabled
++//Initial phase offset 0 (ns) = 0.000
++//Initial phase offset 1 (ns) = 0.000
++//Initial phase offset 2 (ns) = 0.000
++//Initial phase offset 3 (ns) = 0.000
++//SSC is disabled
++
++#define NUM_REGS_MAX 350
++
++typedef struct Reg_Data{
++   unsigned char Reg_Addr;
++   unsigned char Reg_Val;
++   unsigned char Reg_Mask;
++} Reg_Data;
++
++Reg_Data const Reg_Store[NUM_REGS_MAX] = {
++{  0,0x00,0x00},
++{  1,0x00,0x00},
++{  2,0x00,0x00},
++{  3,0x00,0x00},
++{  4,0x00,0x00},
++{  5,0x00,0x00},
++{  6,0x08,0x1D},
++{  7,0x00,0x00},
++{  8,0x70,0x00},
++{  9,0x0F,0x00},
++{ 10,0x00,0x00},
++{ 11,0x00,0x00},
++{ 12,0x00,0x00},
++{ 13,0x00,0x00},
++{ 14,0x00,0x00},
++{ 15,0x00,0x00},
++{ 16,0x00,0x00},
++{ 17,0x00,0x00},
++{ 18,0x00,0x00},
++{ 19,0x00,0x00},
++{ 20,0x00,0x00},
++{ 21,0x00,0x00},
++{ 22,0x00,0x00},
++{ 23,0x00,0x00},
++{ 24,0x00,0x00},
++{ 25,0x00,0x00},
++{ 26,0x00,0x00},
++{ 27,0x70,0x80},
++{ 28,0x0B,0xFF},
++{ 29,0x4A,0xFF},
++{ 30,0xB0,0xFF},
++{ 31,0xE3,0xFF},
++{ 32,0xE3,0xFF},
++{ 33,0xE3,0xFF},
++{ 34,0xC0,0xFF},
++{ 35,0x00,0xFF},
++{ 36,0x00,0x1F},
++{ 37,0x00,0x1F},
++{ 38,0x00,0x1F},
++{ 39,0x06,0x1F},
++{ 40,0x63,0xFF},
++{ 41,0x0C,0x7F},
++{ 42,0x23,0x3F},
++{ 43,0x00,0x00},
++{ 44,0x00,0x00},
++{ 45,0x00,0xFF},
++{ 46,0x00,0xFF},
++{ 47,0x14,0x3F},
++{ 48,0x3A,0xFF},
++{ 49,0x00,0xFF},
++{ 50,0xC4,0xFF},
++{ 51,0x07,0xFF},
++{ 52,0x10,0xFF},
++{ 53,0x00,0xFF},
++{ 54,0x00,0xFF},
++{ 55,0x00,0xFF},
++{ 56,0x00,0xFF},
++{ 57,0x00,0xFF},
++{ 58,0x00,0xFF},
++{ 59,0x00,0xFF},
++{ 60,0x00,0xFF},
++{ 61,0x00,0xFF},
++{ 62,0x00,0x3F},
++{ 63,0x10,0xFF},
++{ 64,0x00,0xFF},
++{ 65,0x00,0xFF},
++{ 66,0x00,0xFF},
++{ 67,0x00,0xFF},
++{ 68,0x00,0xFF},
++{ 69,0x00,0xFF},
++{ 70,0x00,0xFF},
++{ 71,0x00,0xFF},
++{ 72,0x00,0xFF},
++{ 73,0x00,0x3F},
++{ 74,0x10,0xFF},
++{ 75,0x00,0xFF},
++{ 76,0x00,0xFF},
++{ 77,0x00,0xFF},
++{ 78,0x00,0xFF},
++{ 79,0x00,0xFF},
++{ 80,0x00,0xFF},
++{ 81,0x00,0xFF},
++{ 82,0x00,0xFF},
++{ 83,0x00,0xFF},
++{ 84,0x00,0x3F},
++{ 85,0x10,0xFF},
++{ 86,0x00,0xFF},
++{ 87,0x06,0xFF},
++{ 88,0x00,0xFF},
++{ 89,0x00,0xFF},
++{ 90,0x00,0xFF},
++{ 91,0x00,0xFF},
++{ 92,0x01,0xFF},
++{ 93,0x00,0xFF},
++{ 94,0x00,0xFF},
++{ 95,0x00,0x3F},
++{ 96,0x10,0x00},
++{ 97,0x00,0xFF},
++{ 98,0x30,0xFF},
++{ 99,0x00,0xFF},
++{100,0x00,0xFF},
++{101,0x00,0xFF},
++{102,0x00,0xFF},
++{103,0x01,0xFF},
++{104,0x00,0xFF},
++{105,0x00,0xFF},
++{106,0x80,0xBF},
++{107,0x00,0xFF},
++{108,0x00,0xFF},
++{109,0x00,0xFF},
++{110,0x40,0xFF},
++{111,0x00,0xFF},
++{112,0x00,0xFF},
++{113,0x00,0xFF},
++{114,0x40,0xFF},
++{115,0x00,0xFF},
++{116,0x80,0xFF},
++{117,0x00,0xFF},
++{118,0x40,0xFF},
++{119,0x00,0xFF},
++{120,0x00,0xFF},
++{121,0x00,0xFF},
++{122,0x40,0xFF},
++{123,0x00,0xFF},
++{124,0x00,0xFF},
++{125,0x00,0xFF},
++{126,0x00,0xFF},
++{127,0x00,0xFF},
++{128,0x00,0xFF},
++{129,0x00,0x0F},
++{130,0x00,0x0F},
++{131,0x00,0xFF},
++{132,0x00,0xFF},
++{133,0x00,0xFF},
++{134,0x00,0xFF},
++{135,0x00,0xFF},
++{136,0x00,0xFF},
++{137,0x00,0xFF},
++{138,0x00,0xFF},
++{139,0x00,0xFF},
++{140,0x00,0xFF},
++{141,0x00,0xFF},
++{142,0x00,0xFF},
++{143,0x00,0xFF},
++{144,0x00,0xFF},
++{145,0x00,0x00},
++{146,0xFF,0x00},
++{147,0x00,0x00},
++{148,0x00,0x00},
++{149,0x00,0x00},
++{150,0x00,0x00},
++{151,0x00,0x00},
++{152,0x00,0xFF},
++{153,0x00,0xFF},
++{154,0x00,0xFF},
++{155,0x00,0xFF},
++{156,0x00,0xFF},
++{157,0x00,0xFF},
++{158,0x00,0x0F},
++{159,0x00,0x0F},
++{160,0x00,0xFF},
++{161,0x00,0xFF},
++{162,0x00,0xFF},
++{163,0x00,0xFF},
++{164,0x00,0xFF},
++{165,0x00,0xFF},
++{166,0x00,0xFF},
++{167,0x00,0xFF},
++{168,0x00,0xFF},
++{169,0x00,0xFF},
++{170,0x00,0xFF},
++{171,0x00,0xFF},
++{172,0x00,0xFF},
++{173,0x00,0xFF},
++{174,0x00,0xFF},
++{175,0x00,0xFF},
++{176,0x00,0xFF},
++{177,0x00,0xFF},
++{178,0x00,0xFF},
++{179,0x00,0xFF},
++{180,0x00,0xFF},
++{181,0x00,0x0F},
++{182,0x00,0xFF},
++{183,0x00,0xFF},
++{184,0x00,0xFF},
++{185,0x00,0xFF},
++{186,0x00,0xFF},
++{187,0x00,0xFF},
++{188,0x00,0xFF},
++{189,0x00,0xFF},
++{190,0x00,0xFF},
++{191,0x00,0xFF},
++{192,0x00,0xFF},
++{193,0x00,0xFF},
++{194,0x00,0xFF},
++{195,0x00,0xFF},
++{196,0x00,0xFF},
++{197,0x00,0xFF},
++{198,0x00,0xFF},
++{199,0x00,0xFF},
++{200,0x00,0xFF},
++{201,0x00,0xFF},
++{202,0x00,0xFF},
++{203,0x00,0x0F},
++{204,0x00,0xFF},
++{205,0x00,0xFF},
++{206,0x00,0xFF},
++{207,0x00,0xFF},
++{208,0x00,0xFF},
++{209,0x00,0xFF},
++{210,0x00,0xFF},
++{211,0x00,0xFF},
++{212,0x00,0xFF},
++{213,0x00,0xFF},
++{214,0x00,0xFF},
++{215,0x00,0xFF},
++{216,0x00,0xFF},
++{217,0x00,0xFF},
++{218,0x00,0x00},
++{219,0x00,0x00},
++{220,0x00,0x00},
++{221,0x0D,0x00},
++{222,0x00,0x00},
++{223,0x00,0x00},
++{224,0xF4,0x00},
++{225,0xF0,0x00},
++{226,0x00,0x00},
++{227,0x00,0x00},
++{228,0x00,0x00},
++{229,0x00,0x00},
++{230,0x07,0x0F},
++{231,0x00,0x00},
++{232,0x00,0x00},
++{233,0x00,0x00},
++{234,0x00,0x00},
++{235,0x00,0x00},
++{236,0x00,0x00},
++{237,0x00,0x00},
++{238,0x14,0x00},
++{239,0x00,0x00},
++{240,0x00,0x00},
++{242,0x02,0x02},
++{243,0xF0,0x00},
++{244,0x00,0x00},
++{245,0x00,0x00},
++{247,0x00,0x00},
++{248,0x00,0x00},
++{249,0xA8,0x00},
++{250,0x00,0x00},
++{251,0x84,0x00},
++{252,0x00,0x00},
++{253,0x00,0x00},
++{254,0x00,0x00},
++{255, 1, 0xFF}, // set page bit to 1 
++{  0,0x00,0x00},
++{  1,0x00,0x00},
++{  2,0x00,0x00},
++{  3,0x00,0x00},
++{  4,0x00,0x00},
++{  5,0x00,0x00},
++{  6,0x00,0x00},
++{  7,0x00,0x00},
++{  8,0x00,0x00},
++{  9,0x00,0x00},
++{ 10,0x00,0x00},
++{ 11,0x00,0x00},
++{ 12,0x00,0x00},
++{ 13,0x00,0x00},
++{ 14,0x00,0x00},
++{ 15,0x00,0x00},
++{ 16,0x00,0x00},
++{ 17,0x01,0x00},
++{ 18,0x00,0x00},
++{ 19,0x00,0x00},
++{ 20,0x90,0x00},
++{ 21,0x31,0x00},
++{ 22,0x00,0x00},
++{ 23,0x00,0x00},
++{ 24,0x01,0x00},
++{ 25,0x00,0x00},
++{ 26,0x00,0x00},
++{ 27,0x00,0x00},
++{ 28,0x00,0x00},
++{ 29,0x00,0x00},
++{ 30,0x00,0x00},
++{ 31,0x00,0xFF},
++{ 32,0x00,0xFF},
++{ 33,0x01,0xFF},
++{ 34,0x00,0xFF},
++{ 35,0x00,0xFF},
++{ 36,0x90,0xFF},
++{ 37,0x31,0xFF},
++{ 38,0x00,0xFF},
++{ 39,0x00,0xFF},
++{ 40,0x01,0xFF},
++{ 41,0x00,0xFF},
++{ 42,0x00,0xFF},
++{ 43,0x00,0x0F},
++{ 44,0x00,0x00},
++{ 45,0x00,0x00},
++{ 46,0x00,0x00},
++{ 47,0x00,0xFF},
++{ 48,0x00,0xFF},
++{ 49,0x01,0xFF},
++{ 50,0x00,0xFF},
++{ 51,0x00,0xFF},
++{ 52,0x90,0xFF},
++{ 53,0x31,0xFF},
++{ 54,0x00,0xFF},
++{ 55,0x00,0xFF},
++{ 56,0x01,0xFF},
++{ 57,0x00,0xFF},
++{ 58,0x00,0xFF},
++{ 59,0x00,0x0F},
++{ 60,0x00,0x00},
++{ 61,0x00,0x00},
++{ 62,0x00,0x00},
++{ 63,0x00,0xFF},
++{ 64,0x00,0xFF},
++{ 65,0x01,0xFF},
++{ 66,0x00,0xFF},
++{ 67,0x00,0xFF},
++{ 68,0x90,0xFF},
++{ 69,0x31,0xFF},
++{ 70,0x00,0xFF},
++{ 71,0x00,0xFF},
++{ 72,0x01,0xFF},
++{ 73,0x00,0xFF},
++{ 74,0x00,0xFF},
++{ 75,0x00,0x0F},
++{ 76,0x00,0x00},
++{ 77,0x00,0x00},
++{ 78,0x00,0x00},
++{ 79,0x00,0xFF},
++{ 80,0x00,0xFF},
++{ 81,0x00,0xFF},
++{ 82,0x00,0xFF},
++{ 83,0x00,0xFF},
++{ 84,0x90,0xFF},
++{ 85,0x31,0xFF},
++{ 86,0x00,0xFF},
++{ 87,0x00,0xFF},
++{ 88,0x01,0xFF},
++{ 89,0x00,0xFF},
++{ 90,0x00,0xFF},
++{ 91,0x00,0x0F},
++{ 92,0x00,0x00},
++{ 93,0x00,0x00},
++{ 94,0x00,0x00},
++{255, 0, 0xFF} }; // set page bit to 0
++//End of file
++
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/StandardIncludes.h b/lib/sw_apps/zynqmp_fsbl/src/StandardIncludes.h
+new file mode 100755
+index 0000000000..dd410dd146
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/StandardIncludes.h
+@@ -0,0 +1,27 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++#include "SystemDefinitions.h"
++#include "ErrorCodes.h"
++#include "GlobalTypes.h"
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/SystemDefinitions.h b/lib/sw_apps/zynqmp_fsbl/src/SystemDefinitions.h
+new file mode 100755
+index 0000000000..2ce7df1fa1
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/SystemDefinitions.h
+@@ -0,0 +1,118 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++
++//-------------------------------------------------------------------------------------------------
++// System type options
++//-------------------------------------------------------------------------------------------------
++
++#define XILINX_MICROBLAZE 0
++#define XILINX_ARM_SOC 1
++#define ALTERA_NIOS 2
++#define ALTERA_ARM_SOC 3
++#define UBOOT 4
++
++
++//-------------------------------------------------------------------------------------------------
++// System clock frequency
++//-------------------------------------------------------------------------------------------------
++
++#define SYSTEM_CLOCK_FREQUENCY_HZ 100000000
++
++//-------------------------------------------------------------------------------------------------
++// Project definitons
++//-------------------------------------------------------------------------------------------------
++
++#define MODULE_TESTING 0
++#define REFERENCE_DESIGN 1
++
++#define PROJECT MODULE_TEST
++
++
++
++//-------------------------------------------------------------------------------------------------
++// Module type definitions
++//-------------------------------------------------------------------------------------------------
++
++#define MARS_MX1 0
++#define MARS_MX2 1
++#define MERCURY_CA1 2
++#define MARS_ZX2 3
++#define MARS_ZX3 4
++#define MARS_AX3 5
++#define MERCURY_KX1 6
++#define MERCURY_SA1 7
++#define MERCURY_ZX1 8
++#define MERCURY_ZX5 9
++#define MERCURY_SA2 10
++#define MERCURY_KX2 11
++#define MERCURY_AA1 12
++#define MERCURY_XU1 13
++#define MARS_XU3 14
++#define COSMOS_XZQ10 15
++#define MARS_MA3 16
++#define MERCURY_XU5 17
++#define MERCURY_XU7 18
++#define MERCURY_XU8 19
++#define MERCURY_XU9 20
++
++//-------------------------------------------------------------------------------------------------
++// Base board definitions
++//-------------------------------------------------------------------------------------------------
++
++#define MARS_STARTER 0
++#define MERCURY_STARTER 1
++#define MARS_PM3 2
++#define MERCURY_PE1 3
++#define MARS_EB1 4
++#define MARS_ST3 5
++
++//-------------------------------------------------------------------------------------------------
++// Printf definitions
++//-------------------------------------------------------------------------------------------------
++
++#if SYSTEM == XILINX_MICROBLAZE
++#include "xil_printf.h"
++#define EN_PRINTF xil_printf
++#define EN_FLUSH fflush(stdout)
++#elif SYSTEM == XILINX_ARM_SOC
++#include "xil_printf.h"
++#define EN_FLUSH fflush(stdout)
++#define EN_PRINTF xil_printf
++#elif SYSTEM == ALTERA_NIOS
++#define EN_PRINTF printf
++#define EN_FLUSH alt_dcache_flush_all()
++#elif SYSTEM == ALTERA_ARM_SOC
++#if TARGET_MODULE==MERCURY_AA1
++#define EN_PRINTF printf
++#define EN_FLUSH fflush(stdout)
++#else
++#include "uart0_support.h"
++#define EN_PRINTF uart0_printf
++#define EN_FLUSH fflush(stdout)
++#endif
++#elif SYSTEM == UBOOT
++#define EN_PRINTF printf
++#define EN_FLUSH fflush(stdout)
++#endif
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/TargetModuleConfig.h b/lib/sw_apps/zynqmp_fsbl/src/TargetModuleConfig.h
+new file mode 100755
+index 0000000000..5335282cd5
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/TargetModuleConfig.h
+@@ -0,0 +1,276 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#include "ModuleConfigConstants.h"
++
++//-------------------------------------------------------------------------------------------------
++// Cosmos XZQ10
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == COSMOS_XZQ10
++#define CONFIG_PROPERTY_COUNT COSMOS_XZQ10_PROPERTY_COUNT
++#define MODULE_NAME COSMOS_XZQ10_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS COSMOS_XZQ10_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES COSMOS_XZQ10_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS COSMOS_XZQ10_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mars AX3
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MARS_AX3
++#define CONFIG_PROPERTY_COUNT MARS_AX3_PROPERTY_COUNT
++#define MODULE_NAME MARS_AX3_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MARS_AX3_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MARS_AX3_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MARS_AX3_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mars MX1
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MARS_MX1
++#define CONFIG_PROPERTY_COUNT MARS_MX1_PROPERTY_COUNT
++#define MODULE_NAME MARS_MX1_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MARS_MX1_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MARS_MX1_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MARS_MX1_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mars MX2
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MARS_MX2
++#define CONFIG_PROPERTY_COUNT MARS_MX2_PROPERTY_COUNT
++#define MODULE_NAME MARS_MX2_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MARS_MX2_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MARS_MX2_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MARS_MX2_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mars ZX2
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MARS_ZX2
++#define CONFIG_PROPERTY_COUNT MARS_ZX2_PROPERTY_COUNT
++#define MODULE_NAME MARS_ZX2_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MARS_ZX2_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MARS_ZX2_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MARS_ZX2_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mars ZX3
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MARS_ZX3
++#define CONFIG_PROPERTY_COUNT MARS_ZX3_PROPERTY_COUNT
++#define MODULE_NAME MARS_ZX3_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MARS_ZX3_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MARS_ZX3_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MARS_ZX3_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury AA1
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_AA1
++#define CONFIG_PROPERTY_COUNT MERCURY_AA1_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_AA1_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_AA1_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_AA1_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_AA1_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury CA1
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_CA1
++#define CONFIG_PROPERTY_COUNT MERCURY_CA1_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_CA1_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_CA1_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_CA1_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_CA1_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury KX1
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_KX1
++#define CONFIG_PROPERTY_COUNT MERCURY_KX1_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_KX1_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_KX1_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_KX1_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_KX1_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury KX2
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_KX2
++#define CONFIG_PROPERTY_COUNT MERCURY_KX2_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_KX2_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_KX2_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_KX2_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_KX2_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury XU1
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_XU1
++#define CONFIG_PROPERTY_COUNT MERCURY_XU1_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_XU1_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_XU1_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_XU1_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_XU1_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury XU5
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_XU5
++#define CONFIG_PROPERTY_COUNT MERCURY_XU5_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_XU5_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_XU5_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_XU5_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_XU5_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury XU7
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_XU7
++#define CONFIG_PROPERTY_COUNT MERCURY_XU7_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_XU7_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_XU7_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_XU7_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_XU7_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury XU8
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_XU8
++#define CONFIG_PROPERTY_COUNT MERCURY_XU8_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_XU8_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_XU8_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_XU8_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_XU8_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury XU9
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_XU9
++#define CONFIG_PROPERTY_COUNT MERCURY_XU9_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_XU9_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_XU9_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_XU9_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_XU9_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mars XU3
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MARS_XU3
++#define CONFIG_PROPERTY_COUNT MARS_XU3_PROPERTY_COUNT
++#define MODULE_NAME MARS_XU3_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MARS_XU3_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MARS_XU3_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MARS_XU3_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury SA1
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_SA1
++#define CONFIG_PROPERTY_COUNT MERCURY_SA1_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_SA1_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_SA1_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_SA1_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_SA1_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mars MA3
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MARS_MA3
++#define CONFIG_PROPERTY_COUNT MARS_MA3_PROPERTY_COUNT
++#define MODULE_NAME MARS_MA3_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MARS_MA3_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MARS_MA3_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MARS_MA3_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury SA2
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_SA2
++#define CONFIG_PROPERTY_COUNT MERCURY_SA2_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_SA2_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_SA2_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_SA2_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_SA2_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury ZX1
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_ZX1
++#define CONFIG_PROPERTY_COUNT MERCURY_ZX1_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_ZX1_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_ZX1_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_ZX1_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_ZX1_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
++//-------------------------------------------------------------------------------------------------
++// Mercury ZX5
++//-------------------------------------------------------------------------------------------------
++
++#if TARGET_MODULE == MERCURY_ZX5
++#define CONFIG_PROPERTY_COUNT MERCURY_ZX5_PROPERTY_COUNT
++#define MODULE_NAME MERCURY_ZX5_MODULE_NAME
++#define MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS MERCURY_ZX5_MAX_CONFIG_PROPERTY_NAME_LENGTH_CHARACTERS
++#define CONFIG_PROPERTIES_LENGTH_BYTES MERCURY_ZX5_CONFIG_PROPERTIES_LENGTH_BYTES
++#define CONFIG_PROPERTIES_START_ADDRESS MERCURY_ZX5_CONFIG_PROPERTIES_START_ADDRESS
++#endif
++
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/TimerInterface.c b/lib/sw_apps/zynqmp_fsbl/src/TimerInterface.c
+new file mode 100755
+index 0000000000..f455f56915
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/TimerInterface.c
+@@ -0,0 +1,47 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "TimerInterface.h"
++#include "TimerInterfaceVariables.h"
++#include "sleep.h"
++
++//-------------------------------------------------------------------------------------------------
++// Global variable definitions
++//-------------------------------------------------------------------------------------------------
++
++//-------------------------------------------------------------------------------------------------
++// Function definitions
++//-------------------------------------------------------------------------------------------------
++
++EN_RESULT InitialiseTimer()
++{
++    return EN_SUCCESS;
++}
++
++void SleepMilliseconds(uint32_t milliseconds)
++{
++    usleep(1000 * milliseconds);
++}
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/TimerInterface.h b/lib/sw_apps/zynqmp_fsbl/src/TimerInterface.h
+new file mode 100755
+index 0000000000..b8efcbc084
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/TimerInterface.h
+@@ -0,0 +1,53 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "StandardIncludes.h"
++
++
++//-------------------------------------------------------------------------------------------------
++// Function declarations
++//-------------------------------------------------------------------------------------------------
++
++/**
++ * \brief Perform any required initialisation for the timer.
++ *
++ * @returns Result code
++ */
++EN_RESULT InitialiseTimer();
++
++
++/**
++ * \brief Sleep for the defined number of milliseconds.
++ *
++ * Note that if the hardware is not working for some reason, this function may get stuck in
++ * an infinite loop.
++ *
++ * @param milliseconds The number of milliseconds to sleep for
++ */
++void SleepMilliseconds(uint32_t milliseconds);
++
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/TimerInterfaceVariables.h b/lib/sw_apps/zynqmp_fsbl/src/TimerInterfaceVariables.h
+new file mode 100755
+index 0000000000..04a3649fc8
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/TimerInterfaceVariables.h
+@@ -0,0 +1,49 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "StandardIncludes.h"
++
++#include <xparameters.h>
++
++//-------------------------------------------------------------------------------------------------
++// Definitions and constants
++//-------------------------------------------------------------------------------------------------
++
++// no defines needed for Xilinx SOC
++
++//-------------------------------------------------------------------------------------------------
++// Global variable declarations
++//-------------------------------------------------------------------------------------------------
++
++// no defines needed for Xilinx SOC
++
++
++
++
++
++
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/UtilityFunctions.h b/lib/sw_apps/zynqmp_fsbl/src/UtilityFunctions.h
+new file mode 100755
+index 0000000000..5d6f9d100f
+--- /dev/null
++++ b/lib/sw_apps/zynqmp_fsbl/src/UtilityFunctions.h
+@@ -0,0 +1,197 @@
++/**---------------------------------------------------------------------------------------------------
++-- Copyright (c) 2025 by Enclustra GmbH, Switzerland.
++--
++-- Permission is hereby granted, free of charge, to any person obtaining a copy of
++-- this hardware, software, firmware, and associated documentation files (the
++-- "Product"), to deal in the Product without restriction, including without
++-- limitation the rights to use, copy, modify, merge, publish, distribute,
++-- sublicense, and/or sell copies of the Product, and to permit persons to whom the
++-- Product is furnished to do so, subject to the following conditions:
++--
++-- The above copyright notice and this permission notice shall be included in all
++-- copies or substantial portions of the Product.
++--
++-- THE PRODUCT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
++-- INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++-- PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++-- HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++-- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++-- PRODUCT OR THE USE OR OTHER DEALINGS IN THE PRODUCT.
++---------------------------------------------------------------------------------------------------
++*/
++
++#pragma once
++
++
++//-------------------------------------------------------------------------------------------------
++// Includes
++//-------------------------------------------------------------------------------------------------
++
++#include "StandardIncludes.h"
++
++
++//-------------------------------------------------------------------------------------------------
++// Function declarations
++//-------------------------------------------------------------------------------------------------
++
++/**
++ * \brief Convert decimal to binary coded decimal.
++ *
++ * @param decimal	Decimal input
++ * @return			Corresponding binary coded decimal value
++ */
++static inline uint8_t ConvertDecimalToBinaryCodedDecimal(int decimal)
++{
++    return ((decimal / 10) << 4) + (decimal % 10);
++}
++
++
++/**
++ * \brief Convert binary coded decimal to decimal.
++ *
++ * @param bcd		Binary coded decimal
++ * @return			Corresponding decimal value
++ */
++static int ConvertBinaryCodedDecimalToDecimal(uint8_t bcd)
++{
++    return ((bcd >> 4) * 10) + bcd % 16;
++}
++
++
++/**
++ * Simple sleep function.
++ *
++ * @param value Cycles to sleep for.
++ */
++static inline void Sleep(int value)
++{
++    volatile int i = 0;
++    while (value--)
++    {
++        i++;
++    }
++}
++
++
++/**
++ * \brief Convert a little-endian byte array to a 32-bit unsigned int.
++ *
++ * @param pByteArray	Pointer to the byte array
++ * @return				32-bit unsigned int value
++ */
++static inline uint32_t ByteArrayToUnsignedInt32(uint8_t* pByteArray)
++{
++    uint32_t value = (*pByteArray << 24);
++    value += (*(pByteArray + 1) << 16);
++    value += (*(pByteArray + 2) << 8);
++    value += *(pByteArray + 3);
++    return value;
++}
++
++
++/**
++ * \brief Convert a little-endian byte array to a 64-bit unsigned int.
++ *
++ * @param pByteArray	Pointer to the byte array
++ * @return				64-bit unsigned int value
++ */
++static inline uint64_t ByteArrayToUnsignedInt64(uint8_t* pByteArray)
++{
++    uint64_t value;
++    value = (uint64_t) * (pByteArray + 0) << 40;
++    value += (uint64_t) * (pByteArray + 1) << 32;
++    value += (uint64_t) * (pByteArray + 2) << 24;
++    value += (uint64_t) * (pByteArray + 3) << 16;
++    value += (uint64_t) * (pByteArray + 4) << 8;
++    value += (uint64_t) * (pByteArray + 5);
++    return value;
++}
++
++
++/**
++ * \brief Get the upper byte from a 16-bit unsigned int
++ *
++ * @param var	16-bit unsigned int
++ * @return		The upper byte
++ */
++static inline uint8_t GetUpperByte(uint16_t var)
++{
++    return (var >> 8) & 0xFF;
++}
++
++
++/**
++ * \brief Get the lower byte from a 16-byte number
++ *
++ * @param var	16-bit unsigned int
++ * @return		The lower byte
++ */
++static inline uint8_t GetLowerByte(uint16_t var)
++{
++    return (var & 0xFF);
++}
++
++
++/**
++ * \brief change byte order of a 16-bit unsigned int.
++ *
++ * @param InByte		16-bit unsigned int value
++ * @return				16-bit unsigned int value
++ */
++static inline uint16_t ChangeByteOrder(uint16_t InByte)
++{
++    uint16_t value = InByte >> 8;
++    value += (InByte & 0xFF) << 8;
++    return value;
++}
++
++
++/**
++* \brief Returns the higher of the two numerical arguments.
++*/
++#ifndef max
++#define max(a, b) (((a) > (b)) ? (a) : (b))
++#endif
++
++
++/**
++* \brief Returns the lower of the two numerical arguments.
++*/
++#ifndef min
++#define min(a, b) (((a) < (b)) ? (a) : (b))
++#endif
++
++
++/**
++ * \brief Function which extracts a range of bits from a 8-bit unsigned integer.
++ *
++ * The operation is performed with a series of 2 bitwise logical operations.
++ * Assuming bits are numbered from LSB = 0 to MSB = 7, the first operation
++ * shifts the input right by LSB bits, putting the desired bit range LSB in
++ * the 0th (least significant) bit of the expression. The second operation
++ * masks off any bits in positions above those designated by the desired
++ * bit range MSB.
++ *
++ * \param input 		The input 8-bit unsigned integer
++ * \param bitRangeMSB 	The MSB position (0..7) of the bit range we wish to extract
++ * \param bitRangeLSB 	The LSB position (0..7) of the bit range we wish to extract
++ * \return 				An unsigned integer representing the value of the bits bitRangeMSB.. bitRangeLSB
++ */
++static inline uint8_t ExtractBitRange(uint8_t input, uint8_t bitRangeMSB, uint8_t bitRangeLSB)
++{
++    if ((bitRangeMSB <= 7) && (bitRangeLSB <= 7) && (bitRangeLSB <= bitRangeMSB))
++    {
++        return (input >> bitRangeLSB) & ~(~0 << (bitRangeMSB - bitRangeLSB + 1));
++    }
++    else
++    {
++        return 0;
++    }
++}
++
++
++/// Rounds up result of unsigned integer division, without possibility of overflow.
++static inline uint32_t DivideRoundUp(uint32_t numerator, uint32_t denominator)
++{
++    return 1 + ((numerator - 1) / denominator);
++}
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
+index 80a1314203..6e4fe146b0 100644
+--- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
++++ b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
+@@ -29,6 +29,7 @@
+ #include "xfsbl_hw.h"
+ #include "xfsbl_hooks.h"
+ #include "psu_init.h"
++#include "ClockGenerator.h"
+ /************************** Constant Definitions *****************************/
+ 
+ /**************************** Type Definitions *******************************/
+@@ -41,8 +42,45 @@
+ #ifdef XFSBL_BS
+ u32 XFsbl_HookBeforeBSDownload(void )
+ {
++	InitialiseI2cInterface();
+ 	u32 Status = XFSBL_SUCCESS;
+ 
++	bool isClkGenPresented = false;
++	// Initialise Si5338
++	EN_PRINTF("Configuring Si5338 clock generator...\n\r");
++	EN_RESULT res = ClkGen_Initialise(&isClkGenPresented);
++	if(EN_SUCCESS != res && !isClkGenPresented)
++	{
++		XFsbl_Printf(DEBUG_INFO,"Clock generator is NOT initialised!\n\r");
++	}
++
++#ifdef _DEBUG_CLKGEN
++	// Read before write
++	XFsbl_Printf(DEBUG_INFO,"Reading values before write from Si5338\n\r");
++	res = ClkGen_ReadAllData();
++	if(EN_SUCCESS != res)
++	{
++		XFsbl_Printf(DEBUG_INFO,"Register values is NOT read from Si5338!\n\r");
++	}
++#endif
++
++	// Configure Si5338
++	XFsbl_Printf(DEBUG_GENERAL,"Writing register values to the clock generator...\n\r");
++	res = ClkGen_WriteData();
++	if(EN_SUCCESS != res)
++	{
++		XFsbl_Printf(DEBUG_INFO,"Register values is NOT written to Si5338!\n\r");
++	}
++
++#ifdef _DEBUG_CLKGEN
++	// Read Si5338 registers
++	XFsbl_Printf(DEBUG_INFO,"Reading values from Si5338\n\r");
++	res = ClkGen_ReadAllData();
++	if(EN_SUCCESS != res)
++	{
++		XFsbl_Printf(DEBUG_INFO,"Register values is NOT read from Si5338!\n\r");
++	}
++#endif
+ 	/**
+ 	 * Add the code here
+ 	 */

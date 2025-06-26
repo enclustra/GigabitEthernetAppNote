@@ -5,10 +5,10 @@
 
 ## Authors
 
-* Arthur Ruder
+* Enclustra GmbH
 
 ## Changelog
-See [Changelog](changelog.md)
+See [Changelog](changelog.md).
 
 ## Description
 This repository contains the documentation and sample code files for the [Enclustra Gigabit Ethernet Application note](./GigabitEthernetApplicationNote.md).

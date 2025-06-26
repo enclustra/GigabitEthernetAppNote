@@ -6,7 +6,7 @@ MAC addresses (Modules with three PHYs such as the [Mercury+ SA2](https://www.en
 ## 1.1 - Module Configuration Tool (MCT)
 The [Enclustra MCT](https://www.enclustra.com/en/products/tools/module-configuration-tool/) offers a quick and easy way to obtain the MAC address of the module in use. Only a USB connection is required to access and configure various base board and module properties. Please refer to the respective user manual for the correct board setup. The MAC address is highlighted by a red rectangle in the screenshot below.
 
-![MCT screenshot module properties](./figures/MCT.png)
+![MCT screenshot module properties](./figures/RGMII/MCT.png)
 
 ## 1.2 - Bare metal
 As the information is stored on the Secure EEPROM one possibility to obtain the MAC address is to read the specific registers via I2C. Please refer to the Enclustra I2C Application Note for more details ([Enclustra I2C Application Note](https://github.com/enclustra/I2CApplicationNote)). The MAC address can also be set in a bare metal application. Xilinx provides a helper function `xemac_add` as part of the [LWIP library](https://xilinx-wiki.atlassian.net/wiki/spaces/A/pages/18842366/Standalone+LWIP+library) in the Xilinx Software Development Kit (XSDK) as well as Vitis. This function takes the IP address and the Ethernet MAC address for the interface and initializes it. For more details see the [Xilinx App Note XAPP1026](https://www.xilinx.com/support/documentation/application_notes/xapp1026.pdf).
@@ -17,8 +17,8 @@ In U-boot the MAC address can be accessed and modified using environmental varia
 ## 1.4 - Linux
 In Linux the MAC address can be accessed with the command `ifconfig -a`. A serial console output example for the previously described command is shown below.
 
-![Serial console output example](./figures/Linux_MAC.png)
+![Serial console output example](./figures/RGMII/Linux_MAC.png)
 
 The MAC address is available under HWaddr and highlighted by a red rectangle in the figure. The device tree entry to enable Ethernet usually contains a line specifying a local MAC address. This entry is typically overwritten by the value set in U-Boot when using Enclustra Build Environment (EBE). As U-Boot reads the MAC address directly from the Secure EEPROM it gets the modules unique MAC address assigned by Enclustra during production.
 
-**Please continue reading chapter 2 [RGMII timing constraints](./Chapter-2-RGMII_timing_constraints.md)**
+**Please continue reading chapter 2 [PHY configuration](./Chapter-2-PHY_configuration.md)**
